@@ -6,6 +6,18 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pickle import load, dump
 from os.path import join
+import json
+
+def addOriginalRegionLabels(forecastDf):
+    with open('../data/regionMapping.json') as f:
+        regionMapping = json.load(f)
+
+    forecastDf = forecastDf.reset_index()
+    forecastDf['originalRegion'] = ''
+    forecastDf['originalRegion'] = forecastDf.apply(
+        lambda x: regionMapping[x['Region']] if x['Region'] in regionMapping.keys() else x['Region'], axis=1)
+    forecastDf = forecastDf.set_index(['Day', 'Region'], drop=True)
+    return forecastDf
 
 def getConfiguration(configFile):
     with open(configFile, 'r') as stream:
@@ -88,6 +100,7 @@ def movingAvg(series, interval, numDecimalPoint=3):
     simpleMA = np.round(simpleMA, decimals=numDecimalPoint)
     return simpleMA.values
 
+
 def expMovingAvg(series, interval, numDecimalPoint=3):
     '''
     :param series: np.array
@@ -105,6 +118,7 @@ def smoothMAcum(series, interval, numDecimalPoint=3): # Moving average by cumsum
     smoothed = (cumsum[interval:] - cumsum[:-interval]) / interval
     smoothed = np.round(smoothed, decimals=numDecimalPoint)
     return smoothed
+
 
 # USE THIS - AT LEAST FOR KNOW! KEEPS DATA SIZE INTACT
 def smoothMAconv(series, interval, numDecimalPoint=3): # Moving average by numpy convolution

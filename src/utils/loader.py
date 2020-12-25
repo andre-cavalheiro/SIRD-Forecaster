@@ -2,7 +2,7 @@ import os
 import sys
 sys.path.append(os.getcwd() + '/..')
 import logging
-from unidecode import unidecode
+# from unidecode import unidecode
 from os.path import join
 from datetime import datetime, timedelta
 
@@ -47,7 +47,7 @@ def loadNewDf(previousLatestDate, locationAttr, dateAttr, insertionAttr):
 
     # Transform location strings to unicode, also standardize region names (all upper case)
     # newDf['originalReg'] = newDf[locationAttr]
-    newDf[locationAttr] = newDf[locationAttr].apply(lambda x: unidecode(x)).str.upper()
+    newDf[locationAttr] = newDf[locationAttr].str.upper()
 
     # Save region name mapping - should only when run when processing all the data from the begging.
     '''
@@ -120,7 +120,16 @@ def pullNationalData(regions, timePeriod):
     return openSourceDf, latestDate
 
 
-def loadRefinedData(locationAttr='Region', dateAttr='Day'):
+def loadRefinedData(locationAttr='Region', dateAttr='Day', fromOS=False, inputDir='../data'):
+    if fromOS is True:
+        df = pl.load(join(inputDir, 'casesPerRegion'), format='csv')
+        df[dateAttr] = pd.to_datetime(df[dateAttr]).dt.normalize()
+        coveredRegions = pl.uniqueValuesForAttr(df, locationAttr).tolist()
+        coveredDays = pd.Index(sorted(df[dateAttr].unique())).tolist()
+        df = (df.set_index([locationAttr, dateAttr]).sort_index())
+        df = df.drop_duplicates()
+        return df, coveredRegions, coveredDays
+
     # Load db authentication data
     auth = loadConfig()
 
@@ -135,7 +144,7 @@ def loadRefinedData(locationAttr='Region', dateAttr='Day'):
     df = pd.read_sql(query, con=engine)
 
     # Transform location strings to unicode, also standardize region names (all upper case)
-    df[locationAttr] = df[locationAttr].apply(lambda x: unidecode(x)).str.upper()
+    df[locationAttr] = df[locationAttr].str.upper()
 
     # Format dates
     df[dateAttr] = pd.to_datetime(df[dateAttr]).dt.normalize()
@@ -151,6 +160,8 @@ def loadRefinedData(locationAttr='Region', dateAttr='Day'):
 
     engine.dispose()
 
+    # pl.save(df, 'csv', join('../data', f'casesPerRegion'))
+
     return df, coveredRegions, coveredDays
 
 
@@ -159,13 +170,26 @@ def loadPopulation():
     df = df.dropna(axis=0, how='all').dropna(axis=1, how='all')     # Specific to this weird dataset
     df = df.rename(columns={'Anos': 'Region'})
     df = df[df['Region'].notna()]
-    df['Region'] = df["Region"].apply(lambda x: unidecode(x)).str.upper()
+    df['Region'] = df["Region"].str.upper()
     df = df.set_index('Region')
     df = df[2019]
     return df
 
 
-def loadDeathsAndRecoveries(regions, locationAttr='Region'):
+def loadDeathsAndRecoveries(regions, fromOS=False, inputDir='../data'):
+
+    if fromOS is True:
+        df = pl.load(join(inputDir, 'deathsAndRecoveries'), format='csv')
+        regionsToDel = [r for r in regions if r not in df['Region'].unique()]
+        coveredRegions = [r for r in regions if r not in regionsToDel]
+        if len(regionsToDel) > 0:
+            logging.warning(f'National Df doesn\'t include {len(regionsToDel)} regions (ignoring them):')
+            logging.warning(f'{regionsToDel}')
+
+        df = (df.set_index(['Region', 'Day'], drop=True).sort_index())
+        df = df.drop_duplicates()
+        return df, coveredRegions
+
     # Load db authentication data
     auth = loadConfig()
 
@@ -190,6 +214,7 @@ def loadDeathsAndRecoveries(regions, locationAttr='Region'):
     df = df.drop_duplicates()
 
     engine.dispose()
+
     return df, coveredRegions
 
 

@@ -3,7 +3,6 @@ import sys
 sys.path.append(getcwd() + '/..')
 from os.path import join
 import traceback
-from unidecode import unidecode
 import os
 import logging
 from datetime import datetime, timedelta
@@ -14,42 +13,64 @@ import numpy as np
 import pandas as pd
 
 import libs.pandasLib as pl
-import libs.visualization as vz
-from utils.sirdWrapper import Wrapper
+from utils.loader import pullNationalData
+from utils.sirdWrapper import Wrapper, nationalWrapper
+from utils.calculations import calculateNationalRecoveries
 
+def projectParamsForwards(paramsByRegion, method, params, forecastLength, avgInterval):
+    maxValue = 0
 
-def projectParamsForwards(paramsByRegion, method, params, forecastLength, avgInterval=4):
-    futureParamsByRegion = {r: {} for r in paramsByRegion.keys()}
     for region, payload in paramsByRegion.items():
-        if method == 'constant':
+
+        if method == 'last':
             for p in params:
-                futureParamsByRegion[region][p] = [payload[p][-1] for _ in range(forecastLength)]
+                paramsByRegion[region][f'{p}-forecast'] = [payload[p].tolist()[-1] for _ in range(forecastLength)]
         elif method == 'avg':
+            assert(avgInterval is not None)
             for p in params:
-                futureParamsByRegion[region][p] = [np.mean(payload[p][-avgInterval]) for _ in range(forecastLength)]
+                paramsByRegion[region][f'{p}-forecast'] = [np.mean(payload[p].tolist()[-avgInterval]) for _ in range(forecastLength)]
         elif method == 'extrapolation':
             from scipy import interpolate
             for p in params:
-                y = payload[p]
+                y = payload[p].tolist()
                 x = [i for i in range(len(y))]
                 f = interpolate.interp1d(x, y, fill_value="extrapolate")
-                futureParamsByRegion[region][p] = [f(i + len(y)) for i in range(forecastLength)]
+                paramsByRegion[region][f'{p}-forecast'] = [f(i + len(y)).tolist() for i in range(forecastLength)]
         else:
-            raise Exception('Unknown parameter projection method')
-    return futureParamsByRegion
+            raise Exception(f'Unknown parameter projection method - {method}')
+
+        for p in params:
+            if max(paramsByRegion[region][f'{p}-forecast']) > maxValue:
+                maxValue = max(paramsByRegion[region][f'{p}-forecast'])
+            if max(payload[p]) > maxValue:
+                maxValue = max(payload[p])
+
+    return paramsByRegion, maxValue
 
 
-def sirdForecast(df, populationDf, targetRegions, historicPeriod, simulationOriginDay, forecastStartDate, forecastLength,
-                 projectionMethod, movAvgInterval=7, outputPlots=False, outputDir='.'):
+def pseudoCountsUpdate(paramsByRegion, projectedNationalParams, populationDf, params=['beta', 'gamma', 'delta'], k=1000):
+    for r, dt in paramsByRegion.items():
+        for p in params:
+            numA = dt[p].multiply(k)
+            numB = projectedNationalParams['PORTUGAL'][p].multiply(populationDf[r])
+            denom = k+populationDf[r]
+            paramsByRegion[r][p] = (numA+numB)/(denom)
+    return paramsByRegion
 
-    sirdPeriod = historicPeriod[historicPeriod.index(simulationOriginDay): historicPeriod.index(forecastStartDate)+1]
-    dataset = Wrapper(df.reset_index(), populationDf, targetRegions, simulationOriginDay, sirdPeriod)
+def sirdForecast(df, populationDf, targetRegions, sirdPeriod, forecastPeriod, projectionMethod, movAvgInterval,
+                 applyConstantParams, pseudoCounts, constantParams={}, paramPredictInterval=None, nationalParams=None):
+
+    simulationOriginDay, forecastStartDate = sirdPeriod[0], sirdPeriod[-1]
+
+    dataset = Wrapper(df.reset_index(), populationDf, targetRegions, simulationOriginDay, sirdPeriod, applyConstantParams, constantParams)
 
     # Apply moving average to time series
-    dataset.movingAvg(["new-cases", "new-recovered", "new-deaths", "total-active-cases", "total-cases"], movAvgInterval)
+    dataset.movingAvg(["new-cases", "new-recovered", "new-deaths", "total-cases", "total-recovered", "total-deaths",
+                       "total-active-cases"], movAvgInterval)
 
     # Use historic data to calculate parameters
     dataset.calculateSIRDParametersByDay()
+
 
     # Smooth parameter time series
     dataset.smoothSIRDParameters()
@@ -58,38 +79,24 @@ def sirdForecast(df, populationDf, targetRegions, historicPeriod, simulationOrig
     paramsByRegion = dataset.getParamsByRegion()
 
     # Project parameters to the future
-    simulationLength = forecastLength+1
-    predictedParamsByRegion = projectParamsForwards(paramsByRegion, projectionMethod, ['beta', 'gamma', 'delta'], simulationLength)
+    paramsByRegion, highestParam = projectParamsForwards(paramsByRegion, projectionMethod, ['beta', 'gamma', 'delta'],
+                                                         len(forecastPeriod)+1, paramPredictInterval)
+    if pseudoCounts is True:
+        projectedNationalParams, _ = projectParamsForwards(nationalParams, projectionMethod, ['beta', 'gamma', 'delta'],
+                                                         len(forecastPeriod)+1, paramPredictInterval)
+        paramsByRegion = pseudoCountsUpdate(paramsByRegion, projectedNationalParams, populationDf)
+
+    predictedParams = {
+        r: {c: v[f'{c}-forecast'] for c in ['beta', 'gamma', 'delta']}
+        for r, v in paramsByRegion.items()}
 
     # Make forecast
-    forecastPeriod = [forecastStartDate + timedelta(days=x) for x in range(1, forecastLength+1)]
-    resultsByRegion = dataset.sirdSimulation(predictedParamsByRegion, simulationStartDate=forecastStartDate)
+    resultsByRegion = dataset.sirdSimulation(predictedParams, simulationStartDate=forecastStartDate)
 
-    targetRegions = [r for r in targetRegions if r in resultsByRegion.keys()]
     # Transform into dataframe
     resultsDf = dataset.transformIntoDf(resultsByRegion, forecastPeriod)
 
-    if outputPlots is True:
-        saveDir = outputDir
-
-        targetRegions = ['LISBOA', 'PORTO', 'BEJA', 'GUARDA', 'COVILHA', 'AMADORA', 'ODIVELAS',
-                         'CASTELO BRANCO', 'FARO', 'CASCAIS', 'AVEIRO', 'MONTIJO', 'CALDAS DA RAINHA',
-                         'ESPINHO', 'MAIA', 'SINTRA', 'PENAFIEL', 'VISEU', 'SETUBAL', 'BRAGA', 'BARCELOS',
-                         'LAGOS', 'ALCOBACA', 'NAZARE', 'LOURES', 'TORRES VEDRAS']
-
-        # Plot parameter evoltuions
-        logging.info('Plotting...')
-        vz.smallMultiplesGenericWithProjected(paramsByRegion, predictedParamsByRegion, targetRegions,
-                                              ['beta', 'gamma', 'delta'], saveDir, 'parameterEvolution')
-        # Plot forecast
-        historicPeriod = historicPeriod[historicPeriod.index(simulationOriginDay):]
-
-        logging.info('Plotting...')
-        vz.smallMultiplesForecastV2(df, resultsDf, historicPeriod, forecastPeriod, targetRegions, saveDir, 'forecast-new-cases')
-        logging.info('Plotting...')
-        vz.smallMultiplesForecastV2(df, resultsDf, historicPeriod, forecastPeriod, targetRegions, saveDir, 'forecast-new-cases-MA', maPeriod=movAvgInterval)
-
-    return resultsDf
+    return resultsDf, paramsByRegion, highestParam
 
 
 
