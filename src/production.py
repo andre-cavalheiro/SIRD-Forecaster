@@ -47,7 +47,7 @@ if __name__ == '__main__':
         logging.info(f'=== Running Full pipeline ===')
 
         logging.info(f'=== Stage 1 ===')
-        previousLatestDate = pd.to_datetime('2020-03-01', format='%Y-%m-%d')
+        previousLatestDate = pd.to_datetime(' 2020-12-13', format='%Y-%m-%d')    # todo - carefull here
         regionalDf, regions, timePeriod = processNewData(previousLatestDate=previousLatestDate)
 
         logging.info(f'=== Stage 2 ===')

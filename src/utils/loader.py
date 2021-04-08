@@ -2,7 +2,7 @@ import os
 import sys
 sys.path.append(os.getcwd() + '/..')
 import logging
-# from unidecode import unidecode
+from unidecode import unidecode
 from os.path import join
 from datetime import datetime, timedelta
 
@@ -22,7 +22,7 @@ def loadNewDf(previousLatestDate, locationAttr, dateAttr, insertionAttr):
 
     # Set up DB client
     engine = create_engine(
-        f"mysql+pymysql://{auth['username']}:{auth['passwd']}@localhost:{auth['port']}/{auth['origDB']}"
+        f"mysql+pymysql://{auth['username']}:{auth['passwd']}@localhost:{auth['port']}/{auth['originalDB']}"
     )
     logging.info('Connection established!')
 
@@ -47,7 +47,7 @@ def loadNewDf(previousLatestDate, locationAttr, dateAttr, insertionAttr):
 
     # Transform location strings to unicode, also standardize region names (all upper case)
     # newDf['originalReg'] = newDf[locationAttr]
-    newDf[locationAttr] = newDf[locationAttr].str.upper()
+    newDf[locationAttr] = newDf[locationAttr].apply(lambda x: unidecode(x)).str.upper()
 
     # Save region name mapping - should only when run when processing all the data from the begging.
     '''
@@ -66,10 +66,7 @@ def loadNewDf(previousLatestDate, locationAttr, dateAttr, insertionAttr):
     coveredPeriod = [previousLatestDate + timedelta(days=i) for i in range(1, delta+1)]
     assert(coveredPeriod[-1] == currLatestDate)
 
-    # Get unique regions
-    coveredRegions = pl.uniqueValuesForAttr(newDf, locationAttr).tolist()
-
-    return newDf, coveredRegions, coveredPeriod
+    return newDf, coveredPeriod
 
 
 def loadOldLatestDf():
@@ -85,11 +82,12 @@ def loadOldLatestDf():
     # Find latest date
     query = 'SELECT Day FROM cases ORDER BY Day DESC LIMIT 1;'
     latestDate = pd.read_sql(query, con=engine)
-    latestDate = latestDate.loc[0]['Day']
+    latestDate = pd.to_datetime(latestDate.loc[0]['Day'], format='%Y-%m-%d')
 
     # Get dataset
     query = f"SELECT * FROM cases WHERE Day=\'{latestDate}\';"
     df = pd.read_sql(query, con=engine)
+    df['Region'] = df["Region"].apply(lambda x: unidecode(x)).str.upper()       # SÃO JOÃO DA MADEIRA
     df = df.set_index('Region')
     engine.dispose()
     return df, latestDate
@@ -149,9 +147,6 @@ def loadRefinedData(locationAttr='Region', dateAttr='Day', fromOS=False, inputDi
     # Format dates
     df[dateAttr] = pd.to_datetime(df[dateAttr]).dt.normalize()
 
-    # Get unique regions
-    coveredRegions = pl.uniqueValuesForAttr(df, locationAttr).tolist()
-
     # Get unique days
     coveredDays = pd.Index(sorted(df[dateAttr].unique())).tolist()
 
@@ -162,7 +157,7 @@ def loadRefinedData(locationAttr='Region', dateAttr='Day', fromOS=False, inputDi
 
     # pl.save(df, 'csv', join('../data', f'casesPerRegion'))
 
-    return df, coveredRegions, coveredDays
+    return df, coveredDays
 
 
 def loadPopulation():
@@ -170,7 +165,7 @@ def loadPopulation():
     df = df.dropna(axis=0, how='all').dropna(axis=1, how='all')     # Specific to this weird dataset
     df = df.rename(columns={'Anos': 'Region'})
     df = df[df['Region'].notna()]
-    df['Region'] = df["Region"].str.upper()
+    df['Region'] = df["Region"].apply(lambda x: unidecode(x)).str.upper()
     df = df.set_index('Region')
     df = df[2019]
     return df

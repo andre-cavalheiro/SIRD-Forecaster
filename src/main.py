@@ -6,13 +6,14 @@ import logging
 import traceback
 from datetime import datetime, timedelta
 from os.path import join
+import numpy as np
 
 import wandb
 import pandas as pd
+import json
 
 from tasks import processNewData, generateDeathsAndRecoveries, makePredictions
 from utils.loader import loadRefinedData, loadDeathsAndRecoveries
-from basicPlots import basicPlot
 import libs.pandasLib as pl
 import libs.osLib as ol
 
@@ -42,10 +43,12 @@ if __name__ == '__main__':
 
         parser.add_argument("-ma", "--movAvgInterval", help="Moving Average interval", type=int, default=14)
 
-        parser.add_argument("-ppm", "--paramPredictMethod", help="", type=str, default='avg')
-        parser.add_argument("-ppi", "--paramPredictInterval", help="", type=int, default=7)
+        parser.add_argument("-ppm", "--paramPredictMethod", help="", type=str, default='extrapolation')
+        parser.add_argument("-ppi", "--paramPredictInterval", help="", type=int, default=3)
 
         parser.add_argument("-pc", "--pseudoCounts", type=bool, default=True)
+        parser.add_argument("-k", "--pseudoCountsK", type=float, default=10000)
+
         parser.add_argument("-c", "--constantParams", type=bool, default=False)
         parser.add_argument("-bc", "--betaConst", type=float, default=0.08)
         parser.add_argument("-gc", "--gammaConst", type=float, default=0.08)
@@ -55,15 +58,19 @@ if __name__ == '__main__':
 
         simulationStartDate = pd.to_datetime(args.simulationStartDate, format='%Y-%m-%d')
 
+        with open('../data/regionMapping.json') as f:
+            regionMapping = json.load(f)
+
+        regions = list(regionMapping.keys())
         logging.basicConfig(level=logging.INFO)
 
         logging.info(f'=== Running selected stages ===')
 
         if args.stage1 is True:
             logging.info(f'=== Stage 1 ===')
-            regionalDf, regions, timePeriod = processNewData()
+            regionalDf, timePeriod = processNewData(regions)
         else:
-            regionalDf, regions, timePeriod = loadRefinedData(fromOS=False)
+            regionalDf, timePeriod = loadRefinedData(fromOS=False)
             logging.info(f'=== Loaded refined data from DB ===')
 
         if args.stage2 is True:
@@ -76,48 +83,59 @@ if __name__ == '__main__':
 
         if args.stage3 is True:
             logging.info(f'=== Stage 3 ===')
-            #  = timePeriod[timePeriod.index(simulationStartDate):]
+            timePeriod = timePeriod[timePeriod.index(simulationStartDate):]
+            simDates = [timePeriod[-1]]
+            print(simDates)
+            # For paper results
+            minDay, maxDay = pd.to_datetime('2021-02-20', format='%Y-%m-%d'), timePeriod[-1]
+            print(minDay, maxDay)
+            # simDates = [minDay + timedelta(days=x) for x in range((maxDay - minDay).days + 1)]
 
-            simDates = [
-                # pd.to_datetime('2020-08-31', format='%Y-%m-%d'),
-                # pd.to_datetime('2020-09-16', format='%Y-%m-%d'),
-                # pd.to_datetime('2020-10-01', format='%Y-%m-%d'),
-                pd.to_datetime('2020-10-16', format='%Y-%m-%d'),
-                pd.to_datetime('2020-10-31', format='%Y-%m-%d'),
-                pd.to_datetime('2020-11-15', format='%Y-%m-%d'),
-                pd.to_datetime('2020-11-30', format='%Y-%m-%d'),
-                # pd.to_datetime('2020-12-06', format='%Y-%m-%d')
-            ]
-
-            """
-            regions = ['LISBOA', 'PORTO', 'BEJA', 'GUARDA', 'COVILHA', 'AMADORA', 'ODIVELAS',
-                         'CASTELO BRANCO', 'FARO', 'CASCAIS', 'AVEIRO', 'MONTIJO', 'CALDAS DA RAINHA',
-                         'ESPINHO', 'MAIA', 'SINTRA', 'PENAFIEL', 'VISEU', 'SETUBAL', 'BRAGA', 'BARCELOS',
-                         'LAGOS', 'ALCOBACA', 'NAZARE', 'LOURES', 'TORRES VEDRAS', 'GUIMARAES', 'CRATO', 'BARCELOS',
-                        'LOUSADA', 'RIO MAIOR', 'AGUEDA', 'FIGUEIRA DA FOZ', 'TONDELA', 'OBIDOS', 'OURIQUE', 'ESPINHO',
-                        'FAFE', 'NISA', 'MARVAO', 'OEIRAS', 'ALCOCHETE', 'MOITA', 'VIMIOSO', 'BRAGANCA', 'MERTOLA',
-                        'SERPA', 'ALENQUER', 'RIO MAIOR', 'EVORA', 'IDANHA-A-NOVA', 'PENAMACOR', 'PINHEL',
-                        'FIGUEIRA DE CASTELO RODRIGO']
-            """
-            regions =['LISBOA', 'SINTRA', 'SINTRA', 'VILA NOVA DE GAIA', 'PORTO', 'CASCAIS', 'LOURES', 'BRAGA', 'MATOSINHOS', 'AMADORA', 'OEIRAS', 'GONDOMAR', 'SEIXAL']    # Big boys only
-
-            constParams = {'beta': args.betaConst, 'gamma': args.gammaConst, 'delta': args.deltaConst}
-
-            # wandb.init(project="intake-sird-prediction")
-            # wandb.config.update(args)
-            # rootDir = wandb.run.dir
+            auxDay = minDay
+            simDates = [minDay]
+            while auxDay + timedelta(days=7) < maxDay:
+                simDates.append(auxDay+ timedelta(days=7))
+                auxDay = auxDay+ timedelta(days=7)
 
             rootDir = '../data'
 
+            projectionParams = {'method': args.paramPredictMethod, 'avgInterval': args.paramPredictInterval,
+                                'pseudoCounts': args.pseudoCounts, 'pseudoCountsK': args.pseudoCountsK}
+            sirdParams = {'movAvgInterval': args.movAvgInterval, 'applyConstParams': args.constantParams,
+                          'constParams': {'beta': args.betaConst, 'gamma': args.gammaConst, 'delta': args.deltaConst}}
+
+            outputDf = None
+            print('===== Starting forcast =====')
             for forecastStartDate in simDates:
-
-                outputDir = ol.getDir(rootDir, (forecastStartDate+timedelta(days=1)).strftime("%Y-%m-%d"))
-
+                logging.info(f'*** {forecastStartDate} ***')
+                outputDir = ol.getDir(rootDir, (forecastStartDate+timedelta(days=7)).strftime("%Y-%m-%d"))
+                print(outputDir)
+                # outputDir = None
                 predictionDf = makePredictions(regionalDf, regions, timePeriod, forecastStartDate, args.forecastLength,
-                                               args.paramPredictMethod, args.movAvgInterval, args.constantParams,
-                                               args.pseudoCounts, toDB=False,
-                                               outputPlots=True, outputDir=outputDir, constantParams=constParams, paramPredictInterval=args.paramPredictInterval)
+                                               projectionParams, sirdParams, toDB=False, outputPlots=False,
+                                               outputDir=outputDir)
 
-                pl.save(predictionDf, 'csv', join(outputDir, f'predictions'))
+                # print('OUT OF THE LOOOP - WRITING FILE')
+
+                # pl.save(predictionDf, 'csv', join(outputDir, f'predictions'))
+                # pl.save(R0DF, 'csv', join(outputDir, f'R0DF'))
+
+                # For paper results - Keep only last day per prediction
+                startDate = predictionDf.index.get_level_values(0).min()
+                latestDate = predictionDf.index.get_level_values(0).max()
+                print(f'Appending from {startDate} to {latestDate}')
+                '''
+                auxDf = predictionDf.loc[latestDate]
+                auxDf['Day'] = latestDate'''
+                print(f'CURRENT LATEST DATE: {latestDate}')
+                if outputDf is None:
+                    outputDf = predictionDf
+                else:
+                    outputDf = pd.concat([outputDf, predictionDf], axis=0)
+                    r=1
+
+                print(outputDf.tail())
+
+                pl.save(outputDf, 'csv', join(rootDir, f'predictions-long-dataset-march'))
         else:
             pass

@@ -9,7 +9,7 @@ from sklearn.metrics import r2_score
 import wandb
 
 figSize = (55, 55)
-
+DPI = 120
 
 def smallMultiplesForecastV2(historicDf, forecastDf, historicPeriod, forecastPeriod, targetRegions, outputDir,
                              outputName, maPeriod=None):
@@ -58,7 +58,7 @@ def smallMultiplesForecastV2(historicDf, forecastDf, historicPeriod, forecastPer
 
         plt.tight_layout()
 
-    plt.savefig(join(outputDir, f'{outputName}.png'), dpi=300)
+    plt.savefig(join(outputDir, f'{outputName}.png'), dpi=DPI)
     plt.close()
 
 
@@ -109,16 +109,16 @@ def smallMultiplesGenericWithProjected(dataPerRegion, targetRegions, attributes,
         if (num - 1) % plotsPerRow != 0:
             plt.tick_params(labelleft='off')
 
-        lines_labels = [ax.get_legend_handles_labels() for ax in fig.axes]
-        lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
-        fig.legend(lines, labels, loc='lower right', prop={'size': 24})
-
         # Add title
         plt.title(region, loc='left', fontsize=12, fontweight=0)
 
-        plt.tight_layout()
+    lines_labels = [ax.get_legend_handles_labels() for ax in fig.axes]
+    lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
+    fig.legend(lines[:6], labels[:6], loc='lower right', prop={'size': 24})
 
-    plt.savefig(join(outputDir, f'{outputName}.png'), dpi=300)
+    plt.tight_layout()
+
+    plt.savefig(join(outputDir, f'{outputName}.png'), dpi=DPI)
     plt.close()
 
 
@@ -164,10 +164,10 @@ def forecastCorrelation(results, forecastPeriod, outputDir, outputName):
     plt.savefig(join(outputDir, f'{outputName}.png'))
     plt.close()
 
+
 def logToWandb(results):
     forecastId = results['fullPeriod']['origDate'].strftime("%Y-%m-%d")
 
-    counter = 0
     for day, res in results.items():
         if day == 'fullPeriod':
             wandb.log({
@@ -179,6 +179,24 @@ def logToWandb(results):
                 f'{forecastId}/R2': res["R2"],
                 f'{forecastId}/RMSE': res["RMSE"],
             })
+
+
+def logToWandbByRegionType(results):
+    forecastId = results["verySmall"]['fullPeriod']['origDate'].strftime("%Y-%m-%d")
+
+    counter = 0
+    for l, dt in results.items():
+        for day, res in dt.items():
+            if day == 'fullPeriod':
+                wandb.log({
+                    f'R2/{l}/{forecastId}': res["R2"],
+                    f'RMSE/{l}/{forecastId}': res["RMSE"],
+                })
+            else:
+                wandb.log({
+                    f'{forecastId}/{l}/R2': res["R2"],
+                    f'{forecastId}/{l}/RMSE': res["RMSE"],
+                })
 
 
 def smallMultiplesForecast(dataPerRegion, targetRegions, priorSize, predictionSize, outputDir, outputName,
@@ -229,7 +247,7 @@ def smallMultiplesForecast(dataPerRegion, targetRegions, priorSize, predictionSi
 
         plt.tight_layout()
 
-    plt.savefig(join(outputDir, f'{outputName}.png'), dpi=300)
+    plt.savefig(join(outputDir, f'{outputName}.png'), dpi=DPI)
     plt.close()
 
 
@@ -273,7 +291,7 @@ def smallMultiplesGeneric(dataPerRegion, targetRegions, attributes, outputDir, o
 
         plt.tight_layout()
 
-    plt.savefig(join(outputDir, f'{outputName}.png'), dpi=300)
+    plt.savefig(join(outputDir, f'{outputName}.png'), dpi=DPI)
     plt.close()
 
 

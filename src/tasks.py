@@ -4,28 +4,30 @@ sys.path.append(os.getcwd() + '/..')
 import logging
 import traceback
 
+import numpy as np
 import pandas as pd
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from utils.loader import loadNewDf, loadOldLatestDf, loadRefinedData, loadPopulation, pullNationalData
 from utils.saver import updateCasesPerRegion, updateRecoveredAndDead, updateForecast
 from utils.calculations import calculateCasesPerRegion, calculateDeathsAndRecoveries, evaluatePredictions, calculateNationalRecoveries
-from utils.forecast import sirdForecast
 from utils.customExceptions import NegativeActiveCases, ActiveCasesWithNaN
 import libs.visualization as vz
 from libs.utils import addOriginalRegionLabels
-from utils.sirdWrapper import nationalWrapper
-from utils.forecast import projectParamsForwards
+from sird.sirdNationalWrapper import nationalWrapper
+from sird.forecast import nationalSIRD, initSimulation, setForecastingParams, forecast
 
-def processNewData(locationAttr='municipality_of_ocurrence', dateAttr='confirmation_date1',
-                   inputAttr='input_date', previousLatestDate=None):
 
-    latestOldDf = None
-    # latestOldDf, previousLatestDate = loadOldLatestDf()
+def processNewData(regions, locationAttr='municipality_of_ocurrence', dateAttr='confirmation_date1',
+                   inputAttr='input_date', previousLatestDate=None, ):
+
+    # latestOldDf, previousLatestDate = pd.to_datetime('2020-03-02', format='%Y-%m-%d')
+    latestOldDf, previousLatestDate = loadOldLatestDf()
+
     logging.info(f'\t Previous data went only until: {previousLatestDate} \t')
 
-    newDf, regions, newPeriod = loadNewDf(previousLatestDate, locationAttr, dateAttr, inputAttr)
+    newDf, newPeriod = loadNewDf(previousLatestDate, locationAttr, dateAttr, inputAttr)
     logging.info(f'\t Received regional data - most recent date: {newPeriod[-1]} \t')
 
     newDf = calculateCasesPerRegion(newDf, latestOldDf, regions, newPeriod, locationAttr, dateAttr)
@@ -34,16 +36,14 @@ def processNewData(locationAttr='municipality_of_ocurrence', dateAttr='confirmat
     updateCasesPerRegion(newDf)
     logging.info(f'\t Updated DB with new infections \t')
 
-    return newDf, regions, newPeriod
+    return newDf, newPeriod
 
 
 def generateDeathsAndRecoveries(regionalDf, regions, timePeriod, meanRecoveryTime):
     nationalDf, mostRecentDate = pullNationalData(regions, timePeriod)  # todo - verify dates are sufficient
     logging.info(f'\t Pulled national data - most recent date: {mostRecentDate} \t')
 
-    regionalDf, failedRegions = calculateDeathsAndRecoveries(regions, timePeriod, regionalDf=regionalDf,
-                                                             nationalDf=nationalDf,
-                                                             meanRecoveryTime=meanRecoveryTime)
+    regionalDf, failedRegions = calculateDeathsAndRecoveries(regions, timePeriod, regionalDf=regionalDf, nationalDf=nationalDf, meanRecoveryTime=meanRecoveryTime)
     regions = [r for r in regions if r not in failedRegions]
     logging.info(f'\t Generated deaths and recoveries \t')
 
@@ -54,8 +54,7 @@ def generateDeathsAndRecoveries(regionalDf, regions, timePeriod, meanRecoveryTim
 
 
 def makePredictions(regionalDf, regions, historicPeriod, forecastStartDate, forecastLength,
-                    paramPredictMethod, movAvgInterval, applyConstantParams, pseudoCounts,
-                    toDB=False, outputPlots=False, outputDir='.', constantParams={}, paramPredictInterval=None):
+                    projectionParams, sirdParams, toDB=False, outputPlots=False, outputDir='.', ):
 
     populationDf = loadPopulation()
 
@@ -67,71 +66,69 @@ def makePredictions(regionalDf, regions, historicPeriod, forecastStartDate, fore
         logging.warning(f'{regionsToDel}')
 
     # Define temporal periods
-    sirdPeriod = historicPeriod[:historicPeriod.index(forecastStartDate)+1]
+    sirdPeriod = historicPeriod[:historicPeriod.index(forecastStartDate)+2]
     forecastPeriod = [forecastStartDate + timedelta(days=x) for x in range(1, forecastLength+1)]
 
-    if pseudoCounts is True:
-        nationalDf, _ = pullNationalData(regions, historicPeriod)  # todo - verify dates are sufficient
-        nationalDf = calculateNationalRecoveries(nationalDf, historicPeriod)
+    print('FITTING TO HISTORY')
 
-        nationalDf['Region'] = 'PORTUGAL'
-        nationalDf = nationalDf.reset_index()
-        # nationalDf = (nationalDf.set_index(['Region', 'data']).sort_index())
-        nw = nationalWrapper(nationalDf, sirdPeriod[0], sirdPeriod)
-        # Apply moving average to time series
-        nw.movingAvg(["new-cases", "new-recovered", "new-deaths", "total-cases", "total-recovered", "total-deaths", "total-active-cases"], movAvgInterval)
-        # Use historic data to calculate parameters
-        nw.calculateSIRDParametersByDay()
-        # Smooth parameter time series
-        nw.smoothSIRDParameters()
-        nationalParams = nw.getParams()
+    # Fit sird parameters to historical data
+    wp = initSimulation(regionalDf, populationDf, regions, sirdPeriod, sirdParams['applyConstParams'], sirdParams['constParams'], sirdParams['movAvgInterval'])
 
-    # Perform predictions
-    forecastDf, paramsByReg, maxParam = sirdForecast(regionalDf, populationDf, regions, sirdPeriod, forecastPeriod,
-                                              paramPredictMethod, movAvgInterval, applyConstantParams, pseudoCounts,
-                                             constantParams=constantParams, paramPredictInterval=paramPredictInterval,
-                                                     nationalParams=nationalParams)
+    # Project SIRD parameters forward
+    # If necessary run national model
+    nationalParams = nationalSIRD(regions, historicPeriod, sirdPeriod, sirdParams['movAvgInterval'])
 
+    paramsByRegion, maxParam = setForecastingParams(wp, projectionParams['method'], forecastPeriod, projectionParams=projectionParams, pseudoCounts=projectionParams['pseudoCounts'], nationalParams=nationalParams, populationDf=populationDf)
+
+    #with open('../data/regionMapping.json') as f:
+    #    regionMapping = json.load(f)
+
+    # r0ByRegion = {regionMapping[k]: v['R0'] for k, v in paramsByRegion.items()}
+    # r0Df = pd.DataFrame.from_dict(r0ByRegion,orient='index').transpose()
+
+    # Run future simulation
+    predictedParams = {r: {c: v[f'{c}-forecast'] for c in ['beta', 'gamma', 'delta']} for r, v in paramsByRegion.items()}  # Change names to match plot requirements
+    forecastDf = forecast(wp, predictedParams, forecastPeriod)
     logging.info(f'\t Performed prediction successfully \t')
-
+    # Add regional labels to match CERENA requirements
     forecastDf = addOriginalRegionLabels(forecastDf)
 
+    # Save to DB
     if toDB is True:
         updateForecast(forecastDf)
         logging.info(f'\t Updated predictions to DB \t')
 
+    # Make plots
     if outputPlots is True:
-        saveDir = outputDir
-        """"
-        regions2Plot = ['LISBOA', 'PORTO', 'BEJA', 'GUARDA', 'COVILHA', 'AMADORA', 'ODIVELAS',
-                         'CASTELO BRANCO', 'FARO', 'CASCAIS', 'AVEIRO', 'MONTIJO', 'CALDAS DA RAINHA',
-                         'ESPINHO', 'MAIA', 'SINTRA', 'PENAFIEL', 'VISEU', 'SETUBAL', 'BRAGA', 'BARCELOS',
-                         'LAGOS', 'ALCOBACA', 'NAZARE', 'LOURES', 'TORRES VEDRAS', 'GUIMARAES', 'CRATO', 'BARCELOS',
-                        'LOUSADA', 'RIO MAIOR', 'AGUEDA', 'FIGUEIRA DA FOZ', 'TONDELA', 'OBIDOS', 'OURIQUE', 'ESPINHO',
-                        'FAFE', 'NISA', 'MARVAO']
-        regions2Plot = ['LISBOA', 'OEIRAS', 'ALCOCHETE', 'MOITA', 'VIMIOSO', 'BRAGANCA', 'MERTOLA', 'SERPA', 'ALENQUER',
-                        'RIO MAIOR', 'EVORA', 'IDANHA-A-NOVA', 'PENAMACOR', 'PINHEL', 'FIGUEIRA DE CASTELO RODRIGO']
-        """
-
         regions2Plot = regions
 
         logging.info('Updating to wandb...')
-        results = evaluatePredictions(regionalDf, forecastDf, forecastPeriod, regions2Plot)
+        # evaluatePredictions(regionalDf, forecastDf, populationDf, historicPeriod, forecastPeriod, regions2Plot, sirdParams['movAvgInterval'])
+
+
+        # results = evaluatePredictions(regionalDf, forecastDf, forecastPeriod, regions2Plot)
+        # resultsByRegionType = evaluatePredictionsByRegionClass(regionalDf, populationDf, forecastDf, forecastPeriod, regions2Plot)
         # vz.logToWandb(results)
+        # vz.logToWandbByRegionType(resultsByRegionType)
 
         # Plot correlation
-        logging.info('Plotting...')
-        #vz.forecastCorrelation(results, forecastPeriod, saveDir, 'scatter')
+        # logging.info('Plotting...')
+        # vz.forecastCorrelation(results, forecastPeriod, outputDir, 'scatter')
 
-        # Plot parameter evoltuions
-        #logging.info('Plotting...')
-        #vz.smallMultiplesGenericWithProjected(paramsByReg, regions2Plot, ['beta', 'gamma', 'delta'], forecastPeriod,
-        #                                      maxParam, saveDir, 'parameterEvolution')
+        # Load region types (divided by population size)
+        labels = ["verySmall", "small", "big", "veryBig"]
+        with open('../data/regionMapping.json') as f:
+            regionMapping = json.load(f)
+        populationDf = populationDf[populationDf.index.isin(regionMapping.keys())].sort_values(ascending=False)
+        regionTypes = pd.qcut(populationDf, len(labels), labels=labels)
 
-        # Plot forecast
-        #logging.info('Plotting...')
-        #vz.smallMultiplesForecastV2(regionalDf, forecastDf, historicPeriod, forecastPeriod, regions2Plot, saveDir, 'forecast-new-cases')
-        logging.info('Plotting...')
-        vz.smallMultiplesForecastV2(regionalDf, forecastDf, historicPeriod, forecastPeriod, regions2Plot, saveDir, 'forecast-new-cases-MA', maPeriod=movAvgInterval)
+        for l in ["verySmall", "small", "big", "veryBig"]:
+            regions2Plot = regionTypes[regionTypes==l][:10].index.tolist() + regionTypes[regionTypes==l][-10:].index.tolist()
+            # Plot parameter evoltuions
+            logging.info('Plotting...')
+            vz.smallMultiplesGenericWithProjected(paramsByRegion, regions2Plot, ['beta', 'gamma', 'delta'], forecastPeriod, maxParam, outputDir, f'parameterEvolution-{l}')
+
+            logging.info('Plotting...')
+            vz.smallMultiplesForecastV2(regionalDf, forecastDf, historicPeriod, forecastPeriod, regions2Plot, outputDir, f'forecast-MA-{l}', maPeriod=sirdParams['movAvgInterval'])
+
     return forecastDf
-
