@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
+# from sqlalchemy import create_engine
 import json
 
 import libs.pandasLib as pl
@@ -117,7 +117,6 @@ def pullNationalData(regions, timePeriod):
 
     return openSourceDf, latestDate
 
-
 def loadRefinedData(locationAttr='Region', dateAttr='Day', fromOS=False, inputDir='../data'):
     if fromOS is True:
         df = pl.load(join(inputDir, 'casesPerRegion'), format='csv')
@@ -167,14 +166,14 @@ def loadPopulation():
     df = df[df['Region'].notna()]
     df['Region'] = df["Region"].apply(lambda x: unidecode(x)).str.upper()
     df = df.set_index('Region')
-    df = df[2019]
+    df = df[2020]
     return df
 
 
 def loadDeathsAndRecoveries(regions, fromOS=False, inputDir='../data'):
 
     if fromOS is True:
-        df = pl.load(join(inputDir, 'deathsAndRecoveries'), format='csv')
+        df = pl.load(join(inputDir, 'SIRDInputs'), format='csv')
         regionsToDel = [r for r in regions if r not in df['Region'].unique()]
         coveredRegions = [r for r in regions if r not in regionsToDel]
         if len(regionsToDel) > 0:

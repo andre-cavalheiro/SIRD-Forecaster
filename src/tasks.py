@@ -91,7 +91,7 @@ def makePredictions(regionalDf, regions, historicPeriod, forecastStartDate, fore
     forecastDf = forecast(wp, predictedParams, forecastPeriod)
     logging.info(f'\t Performed prediction successfully \t')
     # Add regional labels to match CERENA requirements
-    forecastDf = addOriginalRegionLabels(forecastDf)
+    # forecastDf = addOriginalRegionLabels(forecastDf)
 
     # Save to DB
     if toDB is True:

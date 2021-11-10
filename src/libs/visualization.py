@@ -6,7 +6,6 @@ from matplotlib import cm
 import pandas as pd
 import numpy as np
 from sklearn.metrics import r2_score
-import wandb
 
 figSize = (55, 55)
 DPI = 120

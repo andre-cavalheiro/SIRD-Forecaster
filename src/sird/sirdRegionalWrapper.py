@@ -11,7 +11,6 @@ import skfda.preprocessing.smoothing.kernel_smoothers as ks
 import skfda.preprocessing.smoothing.validation as val
 import pandas as pd
 import numpy as np
-import wandb
 
 from sird.SIRD import SIRD
 
